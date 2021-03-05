@@ -20,12 +20,17 @@ using namespace libconfig;
 
 bool fDumpAll = false;
 bool bCurrentBlockFromExplorer = false;
+string sAppName = "generic-seeder";
+string sAppVersion = "1.1.0";
 string sForceIP;
 string sCurrentBlock;
 int nCurrentBlock = -1;
 int nDefaultBlockHeight = -1;
 
 int cfg_protocol_version;
+int cfg_init_proto_version;
+int cfg_min_peer_proto_version;
+int cfg_caddr_time_version;
 unsigned char cfg_message_start[4];
 int cfg_wallet_port;
 string cfg_explorer_url;
@@ -44,12 +49,13 @@ public:
   const char *ns;
   const char *host;
   const char *tor;
+  const char *ip_addr;
   const char *ipv4_proxy;
   const char *ipv6_proxy;
   const char *force_ip;
   std::set<uint64_t> filter_whitelist;
 
-  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), nPort(53), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fWipeBan(false), fWipeIgnore(false), fDumpAll(false), ipv4_proxy(NULL), ipv6_proxy(NULL), force_ip("a") {}
+  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fWipeBan(false), fWipeIgnore(false), fDumpAll(false), ipv4_proxy(NULL), ipv6_proxy(NULL), force_ip("a") {}
 
   void ParseCommandLine(int argc, char **argv) {
     static const char *help = "generic-seeder\n"
@@ -61,6 +67,7 @@ public:
                               "-m <mbox>       E-Mail address reported in SOA records\n"
                               "-t <threads>    Number of crawlers to run in parallel (default 96)\n"
                               "-d <threads>    Number of DNS server threads (default 4)\n"
+                              "-a <address>    Address to listen on (default ::)\n"
                               "-p <port>       UDP port to listen on (default 53)\n"
                               "-o <ip:port>    Tor proxy IP/Port\n"
                               "-i <ip:port>    IPV4 SOCKS5 proxy IP/Port\n"
@@ -82,6 +89,7 @@ public:
         {"mbox", required_argument, 0, 'm'},
         {"threads", required_argument, 0, 't'},
         {"dnsthreads", required_argument, 0, 'd'},
+        {"address", required_argument, 0, 'a'},
         {"port", required_argument, 0, 'p'},
         {"onion", required_argument, 0, 'o'},
         {"proxyipv4", required_argument, 0, 'i'},
@@ -95,7 +103,7 @@ public:
         {0, 0, 0, 0}
       };
       int option_index = 0;
-      int c = getopt_long(argc, argv, "h:n:m:t:p:d:o:i:k:w:f:?", long_options, &option_index);
+      int c = getopt_long(argc, argv, "h:n:m:t:a:p:d:o:i:k:w:f:?", long_options, &option_index);
       if (c == -1) break;
       switch (c) {
         case 'h': {
@@ -122,6 +130,18 @@ public:
         case 'd': {
           int n = strtol(optarg, NULL, 10);
           if (n > 0 && n < 1000) nDnsThreads = n;
+          break;
+        }
+
+        case 'a': {
+          if (strchr(optarg, ':')==NULL) {
+            char* ip4_addr = (char*) malloc(strlen(optarg)+8);
+            strcpy(ip4_addr, "::FFFF:");
+            strcat(ip4_addr, optarg);
+            ip_addr = ip4_addr;
+          } else {
+            ip_addr = optarg;
+          }
           break;
         }
 
@@ -172,16 +192,16 @@ public:
       }
     }
     if (filter_whitelist.empty()) {
-        filter_whitelist.insert(NODE_NETWORK);
-        filter_whitelist.insert(NODE_NETWORK | NODE_BLOOM);
-        filter_whitelist.insert(NODE_NETWORK | NODE_WITNESS);
-        filter_whitelist.insert(NODE_NETWORK | NODE_WITNESS | NODE_COMPACT_FILTERS);
-        filter_whitelist.insert(NODE_NETWORK | NODE_WITNESS | NODE_BLOOM);
-        filter_whitelist.insert(NODE_NETWORK_LIMITED);
-        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_BLOOM);
-        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS);
-        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_COMPACT_FILTERS);
-        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_BLOOM);
+        filter_whitelist.insert(NODE_NETWORK); // x1
+        filter_whitelist.insert(NODE_NETWORK | NODE_BLOOM); // x5
+        filter_whitelist.insert(NODE_NETWORK | NODE_WITNESS); // x9
+        filter_whitelist.insert(NODE_NETWORK | NODE_WITNESS | NODE_COMPACT_FILTERS); // x49
+        filter_whitelist.insert(NODE_NETWORK | NODE_WITNESS | NODE_BLOOM); // xd
+        filter_whitelist.insert(NODE_NETWORK_LIMITED); // x400
+        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_BLOOM); // x404
+        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS); // x408
+        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_COMPACT_FILTERS); // x448
+        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_BLOOM); // x40c
     }
     if (host != NULL && ns == NULL) showHelp = true;
     if (showHelp) {
@@ -215,9 +235,10 @@ extern "C" void* ThreadCrawler(void* data) {
       res.nClientV = 0;
       res.nHeight = 0;
       res.strClientV = "";
-	  res.bInSync = false;
+      res.bInSync = false;
+      res.services = 0;
       bool getaddr = res.ourLastSuccess + 86400 < now;
-      res.fGood = TestNode(res.service,res.nBanTime,res.nClientV,res.strClientV,res.nHeight,res.bInSync,getaddr ? &addr : NULL);
+      res.fGood = TestNode(res.service,res.nBanTime,res.nClientV,res.strClientV,res.nHeight,res.bInSync,getaddr ? &addr : NULL, res.services);
     }
     db.ResultMany(ips);
     db.Add(addr);
@@ -289,6 +310,7 @@ public:
     dns_opt.datattl = 3600;
     dns_opt.nsttl = 40000;
     dns_opt.cb = GetIPList;
+    dns_opt.addr = opts->ip_addr;
     dns_opt.port = opts->nPort;
     dns_opt.nRequests = 0;
     dbQueries = 0;
@@ -567,7 +589,7 @@ extern "C" void* ThreadStats(void*) {
   return nullptr;
 }
 
-string sSeeds[10];
+string sSeeds[11];
 string *seeds = sSeeds;
 
 extern "C" void* ThreadSeeder(void*) {
@@ -587,7 +609,8 @@ extern "C" void* ThreadSeeder(void*) {
 int main(int argc, char **argv) {
   Config cfg;
   string sConfigName = "settings.conf";
-  
+  printf("%s\n", (sAppName + " v" + sAppVersion).c_str());
+
   try {
     cfg.readFile(sConfigName.c_str());
   } catch(const FileIOException &fioex) {
@@ -603,6 +626,27 @@ int main(int argc, char **argv) {
     cfg_protocol_version = std::stoi(cfg.lookup("protocol_version").c_str());
   } catch(const SettingNotFoundException &nfex) {
     cerr << "Error: Missing 'protocol_version' setting in configuration file." << endl;
+	return(EXIT_FAILURE);
+  }
+
+  try {
+    cfg_init_proto_version = std::stoi(cfg.lookup("init_proto_version").c_str());
+  } catch(const SettingNotFoundException &nfex) {
+    cerr << "Error: Missing 'init_proto_version' setting in configuration file." << endl;
+	return(EXIT_FAILURE);
+  }
+
+  try {
+    cfg_min_peer_proto_version = std::stoi(cfg.lookup("min_peer_proto_version").c_str());
+  } catch(const SettingNotFoundException &nfex) {
+    // If the value is not properly set, then default min_peer_proto_version to the protocol_version
+    cfg_min_peer_proto_version = cfg_protocol_version;
+  }
+
+  try {
+    cfg_caddr_time_version = std::stoi(cfg.lookup("caddr_time_version").c_str());
+  } catch(const SettingNotFoundException &nfex) {
+    cerr << "Error: Missing 'caddr_time_version' setting in configuration file." << endl;
 	return(EXIT_FAILURE);
   }
 

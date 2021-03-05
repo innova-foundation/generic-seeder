@@ -4,7 +4,8 @@
 #include "protocol.h"
 
 extern int nCurrentBlock;
+extern std::string sAppName;
 extern unsigned char cfg_message_start[4];
-bool TestNode(const CService &cip, int &ban, int &client, std::string &clientSV, int &blocks, bool &insync, std::vector<CAddress>* vAddr);
+bool TestNode(const CService &cip, int &ban, int &client, std::string &clientSV, int &blocks, bool &insync, std::vector<CAddress>* vAddr, uint64_t& services);
 
 #endif
